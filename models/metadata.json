@@ -1,0 +1,21 @@
+{
+  "run_id": "9758e478991d485a8c687c54cdd55373",
+  "experiment_name": "iris-classifier-demo",
+  "registered_model_name": "iris-random-forest",
+  "registered_model_version": 3,
+  "model_alias": "champion",
+  "model_type": "RandomForestClassifier",
+  "accuracy": 0.9666666666666667,
+  "f1_macro": 0.9665831244778612,
+  "features": [
+    "sepal length (cm)",
+    "sepal width (cm)",
+    "petal length (cm)",
+    "petal width (cm)"
+  ],
+  "target_names": [
+    "setosa",
+    "versicolor",
+    "virginica"
+  ]
+}
