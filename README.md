@@ -23,3 +23,10 @@ API Testing with pytest
 ↓
 CI with GitHub Actions
 ```
+## Kubernetes Deployment
+
+Apply the Kubernetes manifests:
+
+```bash
+kubectl apply -f k8s/deployment.yaml
+kubectl apply -f k8s/service.yaml
