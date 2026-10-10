@@ -60,3 +60,36 @@ jobs:
         if: github.event_name == 'push'
         run: |
           docker push ghcr.io/yiyi2525/mlops-demo:${{ github.sha }}
+
+  deploy:
+    needs: build
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+
+    steps:
+      - name: Check Kubernetes cluster
+        shell: powershell
+        run: |
+          kubectl config current-context
+          kubectl get nodes
+
+      - name: Deploy new image
+        shell: powershell
+        run: |
+          kubectl set image deployment/mlops-demo-api `
+            mlops-demo-api=ghcr.io/yiyi2525/mlops-demo:${{ github.sha }}
+
+      - name: Wait for rollout
+        shell: powershell
+        run: |
+          kubectl rollout status deployment/mlops-demo-api --timeout=180s
+
+      - name: Verify deployment
+        shell: powershell
+        run: |
+          kubectl get pods
