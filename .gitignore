@@ -8,3 +8,4 @@ mlflow.db
 
 .DS_Store
 .env
+k8s/secret.yaml

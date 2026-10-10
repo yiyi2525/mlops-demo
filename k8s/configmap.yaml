@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: mlops-demo-config
+
+data:
+  MODEL_PATH: "models/model.joblib"
+  METADATA_PATH: "models/metadata.json"
+  APP_ENV: "development"

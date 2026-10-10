@@ -3,15 +3,23 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 
-def test_health():
+def test_liveness():
     with TestClient(app) as client:
-        response = client.get("/health")
+        response = client.get("/health/live")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "alive"
+
+
+def test_readiness():
+    with TestClient(app) as client:
+        response = client.get("/health/ready")
 
     assert response.status_code == 200
 
     data = response.json()
 
-    assert data["status"] == "ok"
+    assert data["status"] == "ready"
     assert data["model_loaded"] is True
 
 
@@ -50,3 +58,23 @@ def test_predict():
     assert "model_version" in data
 
     assert data["predicted_label"] in ["setosa", "versicolor", "virginica"]
+
+def test_readiness_failure(monkeypatch):
+
+    def fake_load(path):
+        raise RuntimeError("Fake model loading error")
+
+    monkeypatch.setattr(
+        "app.main.joblib.load",
+        fake_load
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/health/ready")
+
+    assert response.status_code == 503
+
+    data = response.json()
+
+    assert data["detail"]["status"] == "not_ready"
+    assert data["detail"]["error"] == "Fake model loading error"

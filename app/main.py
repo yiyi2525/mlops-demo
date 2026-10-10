@@ -32,10 +32,35 @@ class PredictResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.model = joblib.load(MODEL_PATH)
 
-    with open(METADATA_PATH, "r", encoding="utf-8") as f:
-        app.state.metadata = json.load(f)
+    app.state.model_ready = False
+    app.state.startup_error = None
+
+    try:
+        # 1. Load model
+        app.state.model = joblib.load(MODEL_PATH)
+
+        # 2. Load metadata
+        with open(METADATA_PATH, "r", encoding="utf-8") as f:
+            app.state.metadata = json.load(f)
+
+        # 3. Sanity check
+        dummy_input = np.array([[5.1, 3.5, 1.4, 0.2]])
+
+        prediction = app.state.model.predict(dummy_input)
+        probabilities = app.state.model.predict_proba(dummy_input)
+
+        if len(prediction) != 1:
+            raise RuntimeError("Model prediction sanity check failed.")
+
+        if probabilities.shape[0] != 1:
+            raise RuntimeError("Model probability sanity check failed.")
+
+        # 4. Model is ready
+        app.state.model_ready = True
+
+    except Exception as e:
+        app.state.startup_error = str(e)
 
     yield
 
@@ -48,11 +73,37 @@ app = FastAPI(
 )
 
 
-@app.get("/health")
-def health():
+@app.get("/health/live")
+def liveness():
     return {
-        "status": "ok",
-        "model_loaded": hasattr(app.state, "model"),
+        "status": "alive"
+    }
+
+
+@app.get("/health/ready")
+def readiness():
+
+    if not getattr(app.state, "model_ready", False):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "not_ready",
+                "error": getattr(
+                    app.state,
+                    "startup_error",
+                    None,
+                ),
+            },
+        )
+
+    return {
+        "status": "ready",
+        "model_loaded": True,
+        "model_version": str(
+            app.state.metadata.get(
+                "registered_model_version"
+            )
+        ),
     }
 
 
@@ -60,6 +111,9 @@ def health():
 def metadata():
     return app.state.metadata
 
+@app.get("/version")
+def version():
+    return {"version": "v1.2"}
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(payload: PredictRequest):
@@ -85,8 +139,13 @@ def predict(payload: PredictRequest):
             predicted_label=predicted_label,
             probabilities=probability_dict,
             model_run_id=metadata.get("run_id"),
-            model_version=str(metadata.get("registered_model_version")),
+            model_version=str(
+                metadata.get("registered_model_version")
+            ),
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=str(e),
+        )

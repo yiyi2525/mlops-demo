@@ -1,8 +1,8 @@
 {
-  "run_id": "9758e478991d485a8c687c54cdd55373",
+  "run_id": "cc80446719394006be90605444ef6c60",
   "experiment_name": "iris-classifier-demo",
   "registered_model_name": "iris-random-forest",
-  "registered_model_version": 3,
+  "registered_model_version": 4,
   "model_alias": "champion",
   "model_type": "RandomForestClassifier",
   "accuracy": 0.9666666666666667,
