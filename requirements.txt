@@ -8,3 +8,5 @@ pydantic
 pytest
 httpx
 requests
+redis==8.1.0
+psycopg[binary]

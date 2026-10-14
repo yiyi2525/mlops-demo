@@ -12,9 +12,11 @@ spec:
       labels:
         app: mlops-demo-api
     spec:
+      imagePullSecrets:
+        - name: ghcr-secret
       containers:
         - name: mlops-demo-api
-          image: ghcr.io/yiyi2525/mlops-demo:v1.1
+          image: ghcr.io/yiyi2525/mlops-demo:8337a1852ac5f4881064f62ee83466f8a068b9bd
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:

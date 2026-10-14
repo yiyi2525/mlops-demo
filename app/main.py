@@ -1,16 +1,38 @@
+import hashlib
 import json
 import os
+
 from contextlib import asynccontextmanager
 from typing import Dict, List, Optional
 
 import joblib
 import numpy as np
+import psycopg
+from psycopg.rows import dict_row
+import redis
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from psycopg.types.json import Jsonb
+from redis.exceptions import RedisError
 
 
 MODEL_PATH = os.getenv("MODEL_PATH", "models/model.joblib")
 METADATA_PATH = os.getenv("METADATA_PATH", "models/metadata.json")
+
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "300"))
+
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = int(os.getenv("DB_PORT", "5432"))
+DB_NAME = os.getenv("DB_NAME", "mlops_demo")
+DB_USER = os.getenv("DB_USER", "mlops_user")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_ENABLED = os.getenv(
+    "DB_ENABLED",
+    "false",
+).lower() == "true"
 
 
 class PredictRequest(BaseModel):
@@ -28,6 +50,58 @@ class PredictResponse(BaseModel):
     probabilities: Dict[str, float]
     model_run_id: Optional[str] = None
     model_version: Optional[str] = None
+    cache_hit: bool = False
+
+
+# -------------------------
+# PostgreSQL helpers
+# -------------------------
+def get_db_connection():
+    return psycopg.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        connect_timeout=2,
+    )
+
+
+
+def save_prediction_history(
+    features: List[float],
+    predicted_class: int,
+    predicted_label: str,
+    model_version: str,
+):
+
+    if not DB_ENABLED:
+        return
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO predictions (
+                        features,
+                        predicted_class,
+                        predicted_label,
+                        model_version
+                    )
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (
+                        Jsonb(features),
+                        predicted_class,
+                        predicted_label,
+                        model_version,
+                    ),
+                )
+
+    except psycopg.Error as e:
+        # History persistence is optional for /predict.
+        # Prediction should still succeed if PostgreSQL is unavailable.
+        print(f"Database write failed: {e}")
 
 
 @asynccontextmanager
@@ -62,12 +136,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         app.state.startup_error = str(e)
 
+    # 5. Create Redis client
+    # Redis is optional.
+    # Do not ping here.
+    app.state.redis_client = redis.Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        decode_responses=True,
+        socket_connect_timeout=1,
+        socket_timeout=1,
+    )
+
     yield
 
 
 app = FastAPI(
     title="MLOps Demo API",
-    description="A minimal FastAPI + MLflow + Docker demo for model serving.",
+    description="A FastAPI model serving demo with Redis caching and PostgreSQL history.",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -83,6 +168,9 @@ def liveness():
 @app.get("/health/ready")
 def readiness():
 
+    # -------------------------
+    # 1. Model - critical dependency
+    # -------------------------
     if not getattr(app.state, "model_ready", False):
         raise HTTPException(
             status_code=503,
@@ -96,6 +184,43 @@ def readiness():
             },
         )
 
+    # -------------------------
+    # 2. Redis - optional dependency
+    # -------------------------
+    redis_available = False
+
+    redis_client = getattr(
+        app.state,
+        "redis_client",
+        None,
+    )
+
+    if redis_client is not None:
+        try:
+            redis_client.ping()
+            redis_available = True
+        except RedisError:
+            redis_available = False
+
+    # -------------------------
+    # 3. PostgreSQL - optional for /predict
+    # -------------------------
+    postgres_available = False
+
+    if DB_ENABLED:
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+
+            postgres_available = True
+
+        except psycopg.Error:
+            postgres_available = False
+
+    # -------------------------
+    # 4. Health response
+    # -------------------------
     return {
         "status": "ready",
         "model_loaded": True,
@@ -104,6 +229,9 @@ def readiness():
                 "registered_model_version"
             )
         ),
+        "redis_available": redis_available,
+        "postgres_enabled": DB_ENABLED,
+        "postgres_available": postgres_available,
     }
 
 
@@ -111,17 +239,69 @@ def readiness():
 def metadata():
     return app.state.metadata
 
+
 @app.get("/version")
 def version():
     return {"version": "v1.2"}
 
+
 @app.post("/predict", response_model=PredictResponse)
 def predict(payload: PredictRequest):
     try:
-        x = np.array(payload.features).reshape(1, -1)
-
         model = app.state.model
         metadata = app.state.metadata
+        redis_client = app.state.redis_client
+
+        model_version = str(
+            metadata.get("registered_model_version")
+        )
+
+        # Cache key = model version + input features
+        cache_source = json.dumps(
+            {
+                "model_version": model_version,
+                "features": payload.features,
+            },
+            sort_keys=True,
+        )
+
+        cache_hash = hashlib.sha256(
+            cache_source.encode("utf-8")
+        ).hexdigest()
+
+        cache_key = f"prediction:{cache_hash}"
+
+        # -------------------------
+        # 1. Try Redis
+        # -------------------------
+        try:
+            cached_value = redis_client.get(cache_key)
+
+            if cached_value is not None:
+                cached_result = json.loads(cached_value)
+
+                # Even a cache hit is still a real prediction request,
+                # so store it in prediction history.
+                save_prediction_history(
+                    features=payload.features,
+                    predicted_class=cached_result["predicted_class"],
+                    predicted_label=cached_result["predicted_label"],
+                    model_version=cached_result["model_version"],
+                )
+
+                return PredictResponse(
+                    **cached_result,
+                    cache_hit=True,
+                )
+
+        except RedisError:
+            # Redis unavailable -> fallback to model
+            pass
+
+        # -------------------------
+        # 2. Model inference
+        # -------------------------
+        x = np.array(payload.features).reshape(1, -1)
 
         predicted_class = int(model.predict(x)[0])
         probabilities = model.predict_proba(x)[0]
@@ -134,18 +314,147 @@ def predict(payload: PredictRequest):
             for i in range(len(target_names))
         }
 
-        return PredictResponse(
+        result = {
+            "predicted_class": predicted_class,
+            "predicted_label": predicted_label,
+            "probabilities": probability_dict,
+            "model_run_id": metadata.get("run_id"),
+            "model_version": model_version,
+        }
+
+        # -------------------------
+        # 3. Save prediction history
+        # -------------------------
+        save_prediction_history(
+            features=payload.features,
             predicted_class=predicted_class,
             predicted_label=predicted_label,
-            probabilities=probability_dict,
-            model_run_id=metadata.get("run_id"),
-            model_version=str(
-                metadata.get("registered_model_version")
-            ),
+            model_version=model_version,
+        )
+
+        # -------------------------
+        # 4. Write Redis cache
+        # -------------------------
+        try:
+            redis_client.setex(
+                cache_key,
+                CACHE_TTL_SECONDS,
+                json.dumps(result),
+            )
+
+        except RedisError:
+            # Redis unavailable -> prediction still succeeds
+            pass
+
+        return PredictResponse(
+            **result,
+            cache_hit=False,
         )
 
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=str(e),
+        )
+
+@app.get("/predictions")
+def get_predictions():
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        features,
+                        predicted_class,
+                        predicted_label,
+                        model_version,
+                        created_at
+                    FROM predictions
+                    ORDER BY id
+                    """
+                )
+
+                rows = cur.fetchall()
+
+        return rows
+
+    except psycopg.Error as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database unavailable: {e}",
+        )
+
+
+@app.get("/predictions/{prediction_id}")
+def get_prediction(prediction_id: int):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        features,
+                        predicted_class,
+                        predicted_label,
+                        model_version,
+                        created_at
+                    FROM predictions
+                    WHERE id = %s
+                    """,
+                    (prediction_id,),
+                )
+
+                row = cur.fetchone()
+
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Prediction not found",
+            )
+
+        return row
+
+    except HTTPException:
+        raise
+
+    except psycopg.Error as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database unavailable: {e}",
+        )
+
+
+@app.delete("/predictions/{prediction_id}", status_code=204)
+def delete_prediction(prediction_id: int):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM predictions
+                    WHERE id = %s
+                    """,
+                    (prediction_id,),
+                )
+
+                deleted_rows = cur.rowcount
+
+        if deleted_rows == 0:
+            raise HTTPException(
+                status_code=404,
+                detail="Prediction not found",
+            )
+
+        return None
+
+    except HTTPException:
+        raise
+
+    except psycopg.Error as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database unavailable: {e}",
         )
