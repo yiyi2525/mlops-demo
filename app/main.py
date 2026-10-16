@@ -167,10 +167,15 @@ def liveness():
 
 @app.get("/health/ready")
 def readiness():
+    """
+    Kubernetes readiness probe.
 
-    # -------------------------
-    # 1. Model - critical dependency
-    # -------------------------
+    Only checks critical dependencies required for the core /predict service.
+    Redis and PostgreSQL are optional for /predict, so they must not block
+    Kubernetes readiness.
+    """
+
+    # Model is the critical dependency for inference.
     if not getattr(app.state, "model_ready", False):
         raise HTTPException(
             status_code=503,
@@ -184,11 +189,28 @@ def readiness():
             },
         )
 
-    # -------------------------
-    # 2. Redis - optional dependency
-    # -------------------------
-    redis_available = False
+    return {
+        "status": "ready",
+        "model_loaded": True,
+        "model_version": str(
+            app.state.metadata.get(
+                "registered_model_version"
+            )
+        ),
+    }
 
+
+@app.get("/health/dependencies")
+def dependency_health():
+    """
+    Diagnostic endpoint for optional dependencies.
+
+    This endpoint is intentionally separate from /health/ready because
+    Redis and PostgreSQL are not required for the core inference path.
+    """
+
+    # Redis
+    redis_available = False
     redis_client = getattr(
         app.state,
         "redis_client",
@@ -202,9 +224,7 @@ def readiness():
         except RedisError:
             redis_available = False
 
-    # -------------------------
-    # 3. PostgreSQL - optional for /predict
-    # -------------------------
+    # PostgreSQL
     postgres_available = False
 
     if DB_ENABLED:
@@ -218,17 +238,7 @@ def readiness():
         except psycopg.Error:
             postgres_available = False
 
-    # -------------------------
-    # 4. Health response
-    # -------------------------
     return {
-        "status": "ready",
-        "model_loaded": True,
-        "model_version": str(
-            app.state.metadata.get(
-                "registered_model_version"
-            )
-        ),
         "redis_available": redis_available,
         "postgres_enabled": DB_ENABLED,
         "postgres_available": postgres_available,
