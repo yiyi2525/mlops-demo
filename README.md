@@ -12,11 +12,16 @@ It also integrates Redis for prediction caching and PostgreSQL for prediction hi
 
 ## Architecture Overview
 
+The project currently demonstrates two complementary environments:
+
+- **CI/CD + Kubernetes** for image delivery and deployment.
+- **Docker Compose** for the complete local application stack with Redis and PostgreSQL.
+
 ```mermaid
 flowchart TD
     A[Developer] -->|git push| B[GitHub]
-
     B --> C[GitHub Actions]
+
     C --> D[Run pytest]
     D -->|pass| E[Build Docker Image]
     E --> F[Tag with Git Commit SHA]
@@ -26,13 +31,13 @@ flowchart TD
     H --> I[deploy.ps1]
     I --> J[kubectl set image]
     J --> K[Kubernetes Deployment]
-
     K --> L[Rolling Update]
     L --> M[FastAPI Pods]
-
     M --> N[ML Model]
-    M --> O[Redis Cache]
-    M --> P[PostgreSQL History]
+
+    O[Docker Compose] --> P[FastAPI]
+    P --> Q[Redis Cache]
+    P --> R[PostgreSQL History]
 ```
 
 ### Current Environment
