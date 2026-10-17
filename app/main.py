@@ -346,10 +346,10 @@ def predict(payload: PredictRequest):
         # 4. Write Redis cache
         # -------------------------
         try:
-            redis_client.setex(
+            redis_client.set(
                 cache_key,
-                CACHE_TTL_SECONDS,
                 json.dumps(result),
+                ex=CACHE_TTL_SECONDS,
             )
 
         except RedisError:

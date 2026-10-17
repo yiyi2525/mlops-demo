@@ -1,6 +1,14 @@
+<#
+.SYNOPSIS
+    部署腳本
+.PARAMETER ImageTag
+    Docker 映像檔的 Tag 或 Commit Hash
+.EXAMPLE
+    .\scripts\deploy.ps1 4864a00220fe66ad21320a2fb7aa9aes3ee6b306e
+#>
 param(
     [Parameter(Mandatory = $true)]
-    [string]$ImageTag
+    [string]$ImageTag 
 )
 
 $ErrorActionPreference = "Stop"
